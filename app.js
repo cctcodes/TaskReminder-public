@@ -13,7 +13,7 @@
  *   - intervalDays / anchorDate: reset interval details for managed game schedules
  *   - periodEnd / patchOffsetDays: known patch-activity availability window
  *   - spawnOf  : set when this task was auto-created as the next occurrence of task.id
- *   Tasks are persisted in localStorage under the key "elegant-todo.tasks".
+ *   Tasks and progress are persisted in versioned localStorage keys.
  *
  * RECURRING TASKS
  *   Completing a recurring task marks it done and spawns its next occurrence
@@ -33,11 +33,19 @@
 (() => {
   "use strict";
 
-  // localStorage keys
-  const STORAGE_KEY = "elegant-todo.tasks";
+  // localStorage keys. V3 intentionally starts clean: the app was not yet in
+  // active use, and the new occurrence history cannot be reconstructed from the
+  // old mutable task records.
+  const STORAGE_VERSION = "3";
+  const STORAGE_VERSION_KEY = "task-reminder.schema";
+  const STORAGE_KEY = "task-reminder.v3.tasks";
+  const SELECTED_GAMES_KEY = "task-reminder.v3.selected-games";
+  const PROGRESS_HISTORY_KEY = "task-reminder.v3.progress-history";
+  const PROGRESS_RANGE_KEY = "task-reminder.v3.progress-range";
+  const CHARACTER_DONE_KEY = "task-reminder.v3.character-reminders";
+  const TODAY_REMINDER_DISMISSED_KEY = "task-reminder.v3.dismissed-today-reminders";
   const THEME_KEY = "elegant-todo.theme";
-  const CHARACTER_DONE_KEY = "elegant-todo.character-reminders";
-  const GAME_PACK_SYNC_KEY = "elegant-todo.game-pack-sync.v2";
+  let storageAvailable = true;
 
   // ---- DOM element lookups (ids are defined in index.html) ----
 
@@ -62,9 +70,14 @@
   const counter = document.getElementById("counter");
   const progressLabel = document.getElementById("progressLabel");
   const filters = document.getElementById("filters");
-  const clearBtn = document.getElementById("clearCompleted");
+  const todayReminders = document.getElementById("todayReminders");
   const clearAll = document.getElementById("clearAll");
   const dateLine = document.getElementById("dateLine");
+  const localStatus = document.getElementById("localStatus");
+  const progressTabs = document.getElementById("progressTabs");
+  const progressRangeLabel = document.getElementById("progressRangeLabel");
+  const progressVisual = document.getElementById("progressVisual");
+  const progressBreakdown = document.getElementById("progressBreakdown");
 
   const viewTabs = document.getElementById("viewTabs");
   const tasksView = document.getElementById("tasksView");
@@ -75,11 +88,23 @@
   const themeIcon = document.getElementById("themeIcon");
   const themeLabel = document.getElementById("themeLabel");
 
+  const settingsToggle = document.getElementById("settingsToggle");
+  const settingsPanel = document.getElementById("settingsPanel");
+  const settingsClose = document.getElementById("settingsClose");
+  const exportDataText = document.getElementById("exportDataText");
+  const downloadData = document.getElementById("downloadData");
+  const copyData = document.getElementById("copyData");
+  const importDataFile = document.getElementById("importDataFile");
+  const importDataText = document.getElementById("importDataText");
+  const importData = document.getElementById("importData");
+  const dataTransferStatus = document.getElementById("dataTransferStatus");
+
   const calTitle = document.getElementById("calTitle");
   const calDays = document.getElementById("calDays");
   const calPrev = document.getElementById("calPrev");
   const calNext = document.getElementById("calNext");
   const calToday = document.getElementById("calToday");
+  const calDateJump = document.getElementById("calDateJump");
   const calForm = document.getElementById("calForm");
   const calInput = document.getElementById("calInput");
   const calTaskList = document.getElementById("calTaskList");
@@ -98,20 +123,27 @@
   const confirmOk = document.getElementById("confirmOkBtn");
 
   // ---- app state ----
+  prepareStorage();
   let tasks = load();
   let completedCharacters = loadCompletedCharacters();
-  let filter = "all"; // "all" | "active" | "completed"
+  let dismissedTodayReminders = loadDismissedTodayReminders();
+  let selectedGames = loadSelectedGames();
+  let progressHistory = loadProgressHistory();
+  let progressRange = loadProgressRange();
+  let filter = "active"; // "all" | "active" | "completed"
   let repeat = { type: "none", weekday: null }; // pending repeat rule for the next added task
   let view = "tasks"; // left-card view: "tasks" | "reminders"
+  let reminderRange = "upcoming"; // "upcoming" | "current"
+  let suppressSuggestionOpen = false;
 
   // Calendar state (defaults to the current month/day)
   const now = new Date();
   let calYear = now.getFullYear();
   let calMonth = now.getMonth();
   let selectedKey = toKey(now);
-  // Calendar day list: which game boxes are expanded (keyed "day::game") so the
-  // open/closed state survives re-renders.
-  const expandedCalGames = new Set();
+  // Calendar game groups open by default. User-collapsed groups remain closed
+  // across re-renders for the selected date.
+  const collapsedCalGames = new Set();
 
   /* ---------- date helpers ----------
    * Dates are stored and compared as LOCAL "YYYY-MM-DD" strings.
@@ -233,26 +265,82 @@
 
   /* ---------- storage ---------- */
 
-  // Read tasks from localStorage. Backfills missing fields so older saved data
-  // still validates against the current task shape.
+  function storageGet(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      reportStorageFailure();
+      return null;
+    }
+  }
+
+  function storageSet(key, value) {
+    try {
+      localStorage.setItem(key, value);
+      return true;
+    } catch {
+      reportStorageFailure();
+      return false;
+    }
+  }
+
+  function storageRemove(key) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      reportStorageFailure();
+    }
+  }
+
+  function reportStorageFailure() {
+    if (!storageAvailable) return;
+    storageAvailable = false;
+    localStatus.classList.add("storage-failed");
+    localStatus.innerHTML = '<i class="bi bi-exclamation-triangle"></i> Changes cannot be saved';
+  }
+
+  function prepareStorage() {
+    if (storageGet(STORAGE_VERSION_KEY) === STORAGE_VERSION) return;
+    [
+      "elegant-todo.tasks",
+      "elegant-todo.character-reminders",
+      "elegant-todo.game-pack-sync.v2",
+      STORAGE_KEY,
+      SELECTED_GAMES_KEY,
+      PROGRESS_HISTORY_KEY,
+      PROGRESS_RANGE_KEY,
+      CHARACTER_DONE_KEY,
+      TODAY_REMINDER_DISMISSED_KEY,
+    ].forEach(storageRemove);
+    storageSet(STORAGE_VERSION_KEY, STORAGE_VERSION);
+  }
+
   function load() {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const raw = storageGet(STORAGE_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(parsed)) return [];
-      return parsed.map((t) => ({ date: null, repeat: null, weekday: null, monthDay: null, game: null, ...t }));
+      return parsed.map((t) => ({
+        date: null,
+        repeat: null,
+        weekday: null,
+        monthDay: null,
+        game: null,
+        seriesId: t.id || uid(),
+        ...t,
+      }));
     } catch {
       return [];
     }
   }
 
   function save() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+    storageSet(STORAGE_KEY, JSON.stringify(tasks));
   }
 
   function loadCompletedCharacters() {
     try {
-      const raw = localStorage.getItem(CHARACTER_DONE_KEY);
+      const raw = storageGet(CHARACTER_DONE_KEY);
       const parsed = raw ? JSON.parse(raw) : {};
       return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
     } catch {
@@ -261,7 +349,206 @@
   }
 
   function saveCompletedCharacters() {
-    localStorage.setItem(CHARACTER_DONE_KEY, JSON.stringify(completedCharacters));
+    storageSet(CHARACTER_DONE_KEY, JSON.stringify(completedCharacters));
+  }
+
+  function loadDismissedTodayReminders() {
+    try {
+      const parsed = JSON.parse(storageGet(TODAY_REMINDER_DISMISSED_KEY) || "{}");
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveDismissedTodayReminders() {
+    storageSet(TODAY_REMINDER_DISMISSED_KEY, JSON.stringify(dismissedTodayReminders));
+  }
+
+  function loadSelectedGames() {
+    try {
+      const parsed = JSON.parse(storageGet(SELECTED_GAMES_KEY) || "[]");
+      return new Set(Array.isArray(parsed) ? parsed.filter((game) => typeof game === "string") : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  function saveSelectedGames() {
+    storageSet(SELECTED_GAMES_KEY, JSON.stringify([...selectedGames]));
+  }
+
+  function loadProgressHistory() {
+    try {
+      const parsed = JSON.parse(storageGet(PROGRESS_HISTORY_KEY) || "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveProgressHistory() {
+    storageSet(PROGRESS_HISTORY_KEY, JSON.stringify(progressHistory));
+  }
+
+  function loadProgressRange() {
+    const saved = storageGet(PROGRESS_RANGE_KEY);
+    return ["day", "week", "month"].includes(saved) ? saved : "day";
+  }
+
+  const EXPORT_APP = "task-reminder";
+  const MAX_IMPORT_SIZE = 10 * 1024 * 1024;
+  const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+  const isRecordArray = (value) => Array.isArray(value) && value.every(isRecord);
+  const EXPORT_FIELDS = [
+    { key: STORAGE_VERSION_KEY, fallback: STORAGE_VERSION, valid: (value) => value === STORAGE_VERSION },
+    { key: STORAGE_KEY, fallback: [], valid: isRecordArray },
+    {
+      key: SELECTED_GAMES_KEY,
+      fallback: [],
+      valid: (value) => Array.isArray(value) && value.every((game) => typeof game === "string"),
+    },
+    { key: PROGRESS_HISTORY_KEY, fallback: [], valid: isRecordArray },
+    {
+      key: PROGRESS_RANGE_KEY,
+      fallback: "day",
+      valid: (value) => ["day", "week", "month"].includes(value),
+    },
+    { key: CHARACTER_DONE_KEY, fallback: {}, valid: isRecord },
+    { key: TODAY_REMINDER_DISMISSED_KEY, fallback: {}, valid: isRecord },
+    {
+      key: THEME_KEY,
+      fallback: "light",
+      valid: (value) => value === "light" || value === "dark",
+    },
+  ];
+
+  function exportFieldValue({ key, fallback, valid }) {
+    const raw = storageGet(key);
+    if (raw === null) return fallback;
+    if ([STORAGE_VERSION_KEY, PROGRESS_RANGE_KEY, THEME_KEY].includes(key)) {
+      return valid(raw) ? raw : fallback;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      return valid(parsed) ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function buildExportText() {
+    const data = {};
+    EXPORT_FIELDS.forEach((field) => {
+      data[field.key] = exportFieldValue(field);
+    });
+    return JSON.stringify(
+      {
+        app: EXPORT_APP,
+        schema: STORAGE_VERSION,
+        exportedAt: new Date().toISOString(),
+        data,
+      },
+      null,
+      2
+    );
+  }
+
+  function setTransferStatus(message, type = "") {
+    dataTransferStatus.textContent = message;
+    dataTransferStatus.className = `data-transfer-status${type ? ` is-${type}` : ""}`;
+  }
+
+  function refreshExportText() {
+    exportDataText.value = buildExportText();
+  }
+
+  function parseImportText(text) {
+    if (!text.trim()) throw new Error("Paste backup text or choose a backup file first.");
+    if (text.length > MAX_IMPORT_SIZE) throw new Error("This backup is too large to import.");
+
+    let bundle;
+    try {
+      bundle = JSON.parse(text);
+    } catch {
+      throw new Error("This is not valid JSON backup text.");
+    }
+
+    if (!isRecord(bundle)) throw new Error("This backup has an invalid format.");
+    if (bundle.app !== EXPORT_APP) throw new Error("This backup was not created by Task Reminder.");
+    if (bundle.schema !== STORAGE_VERSION) {
+      throw new Error(`Only Task Reminder schema ${STORAGE_VERSION} backups can be imported.`);
+    }
+    if (!isRecord(bundle.data)) throw new Error("This backup does not contain a valid data section.");
+
+    EXPORT_FIELDS.forEach((field) => {
+      if (!Object.prototype.hasOwnProperty.call(bundle.data, field.key)) {
+        throw new Error(`This backup is missing required data: ${field.key}.`);
+      }
+      if (!field.valid(bundle.data[field.key])) {
+        throw new Error(`This backup contains invalid data for: ${field.key}.`);
+      }
+    });
+    return bundle.data;
+  }
+
+  function serializedImportData(data) {
+    const values = new Map();
+    EXPORT_FIELDS.forEach(({ key }) => {
+      const value = data[key];
+      values.set(
+        key,
+        [STORAGE_VERSION_KEY, PROGRESS_RANGE_KEY, THEME_KEY].includes(key)
+          ? value
+          : JSON.stringify(value)
+      );
+    });
+    return values;
+  }
+
+  function replaceStoredData(values) {
+    const previous = new Map(EXPORT_FIELDS.map(({ key }) => [key, storageGet(key)]));
+    const written = [];
+    for (const [key, value] of values) {
+      if (storageSet(key, value)) {
+        written.push(key);
+        continue;
+      }
+      written.forEach((writtenKey) => {
+        const oldValue = previous.get(writtenKey);
+        if (oldValue === null) storageRemove(writtenKey);
+        else storageSet(writtenKey, oldValue);
+      });
+      return false;
+    }
+    return true;
+  }
+
+  async function confirmImport(text) {
+    let data;
+    try {
+      data = parseImportText(text);
+    } catch (error) {
+      setTransferStatus(error.message, "error");
+      return;
+    }
+
+    const ok = await showDialog({
+      title: "Replace all saved data?",
+      body: "This import will replace every task, reminder, game selection, progress record, setting, and theme currently saved on this device. This cannot be undone unless you export a backup first.",
+      okLabel: "Replace data",
+    });
+    if (!ok) return;
+
+    if (!replaceStoredData(serializedImportData(data))) {
+      setTransferStatus("The import could not be saved. Your previous data was restored.", "error");
+      return;
+    }
+    window.location.reload();
+  }
+
+  function selectedGameNames() {
+    return SUGGEST_ORDER.filter((game) => selectedGames.has(game));
   }
 
   function uid() {
@@ -272,10 +559,21 @@
 
   // Promise-based confirm/reminder modal. Resolves true on OK, false on cancel/
   // dismiss. When cancel:false, only the OK button is shown.
-  const confirmModal = bootstrap.Modal.getOrCreateInstance(confirmModalEl);
+  const confirmModal =
+    typeof bootstrap !== "undefined" && bootstrap.Modal
+      ? bootstrap.Modal.getOrCreateInstance(confirmModalEl)
+      : null;
 
   function showDialog({ title, body, okLabel = "OK", cancel = true }) {
+    if (!confirmModal) {
+      if (!cancel) {
+        window.alert(`${title}\n\n${body}`);
+        return Promise.resolve(true);
+      }
+      return Promise.resolve(window.confirm(`${title}\n\n${body}`));
+    }
     return new Promise((resolve) => {
+      const opener = document.activeElement;
       confirmTitle.textContent = title;
       confirmBody.textContent = body;
       confirmOk.textContent = okLabel;
@@ -286,10 +584,16 @@
         confirmOk.removeEventListener("click", onOk);
         confirmModalEl.removeEventListener("hidden.bs.modal", onHidden);
       };
+      const restoreFocus = () => {
+        const target = opener && opener.isConnected && opener !== document.body ? opener : input;
+        if (target === input) suppressSuggestionOpen = true;
+        target.focus({ preventScroll: true });
+      };
       const onOk = () => {
         if (settled) return;
         settled = true;
         cleanup();
+        confirmModalEl.addEventListener("hidden.bs.modal", restoreFocus, { once: true });
         confirmModal.hide();
         resolve(true);
       };
@@ -297,6 +601,7 @@
         if (settled) return;
         settled = true;
         cleanup();
+        restoreFocus();
         resolve(false);
       };
 
@@ -317,14 +622,14 @@
     themeLabel.textContent = dark ? "Day" : "Night";
     themeToggle.setAttribute("aria-pressed", String(dark));
     try {
-      localStorage.setItem(THEME_KEY, theme);
+      storageSet(THEME_KEY, theme);
     } catch {}
   }
 
   function initTheme() {
     let saved = null;
     try {
-      saved = localStorage.getItem(THEME_KEY);
+      saved = storageGet(THEME_KEY);
     } catch {}
     const theme =
       saved === "dark" || saved === "light"
@@ -339,6 +644,75 @@
     const current = document.documentElement.getAttribute("data-bs-theme");
     applyTheme(current === "dark" ? "light" : "dark");
   });
+
+  function setSettingsOpen(open) {
+    settingsPanel.classList.toggle("d-none", !open);
+    settingsToggle.setAttribute("aria-expanded", String(open));
+    settingsToggle.setAttribute("aria-label", open ? "Close data settings" : "Open data settings");
+    settingsToggle.classList.toggle("active", open);
+    if (open) {
+      refreshExportText();
+      setTransferStatus("");
+      settingsPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }
+
+  settingsToggle.addEventListener("click", () => {
+    setSettingsOpen(settingsPanel.classList.contains("d-none"));
+  });
+
+  settingsClose.addEventListener("click", () => {
+    setSettingsOpen(false);
+    settingsToggle.focus();
+  });
+
+  downloadData.addEventListener("click", () => {
+    const text = buildExportText();
+    exportDataText.value = text;
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `task-reminder-export-${todayKey()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setTransferStatus("Backup file downloaded.", "success");
+  });
+
+  copyData.addEventListener("click", async () => {
+    refreshExportText();
+    try {
+      await navigator.clipboard.writeText(exportDataText.value);
+      setTransferStatus("Backup text copied to the clipboard.", "success");
+    } catch {
+      exportDataText.focus();
+      exportDataText.select();
+      setTransferStatus("Clipboard access was blocked. The backup text is selected for you to copy.", "error");
+    }
+  });
+
+  importDataFile.addEventListener("change", async () => {
+    const [file] = importDataFile.files;
+    if (!file) return;
+    if (file.size > MAX_IMPORT_SIZE) {
+      setTransferStatus("This backup file is too large to import.", "error");
+      importDataFile.value = "";
+      return;
+    }
+    try {
+      const text = await file.text();
+      importDataText.value = text;
+      await confirmImport(text);
+    } catch {
+      setTransferStatus("The selected backup file could not be read.", "error");
+    } finally {
+      importDataFile.value = "";
+    }
+  });
+
+  importData.addEventListener("click", () => confirmImport(importDataText.value));
 
   /* ---------- repeat rules ----------
    * The "Repeat" dropdown on the add-task form sets a PENDING rule that is
@@ -364,6 +738,9 @@
 
     repeatLabel.textContent = label;
     repeatToggle.classList.toggle("btn-repeat-on", repeat.type !== "none");
+    dueDate.required = repeat.type === "none";
+    dueDate.setAttribute("aria-required", String(dueDate.required));
+    if (!dueDate.required) dueDate.setCustomValidity("");
 
     repeatMenu.querySelectorAll("[data-repeat]").forEach((b) =>
       b.classList.toggle("active", b.dataset.repeat === repeat.type)
@@ -409,7 +786,9 @@
     const w = e.target.closest("[data-weekday]");
     if (w) {
       setRepeat("weekly", Number(w.dataset.weekday));
-      bootstrap.Dropdown.getOrCreateInstance(repeatToggle).hide();
+      if (typeof bootstrap !== "undefined" && bootstrap.Dropdown) {
+        bootstrap.Dropdown.getOrCreateInstance(repeatToggle).hide();
+      }
     }
   });
 
@@ -662,34 +1041,92 @@
 
   function updateSuggestions() {
     const q = input.value.trim().toLowerCase();
-    if (!q) {
-      hideSuggestions();
-      return;
-    }
     const matches = SUGGEST_ORDER.filter((name) => {
       const pack = GAME_PACKS[name];
       const aliasMatch = (pack.aliases || []).some((a) => a.toLowerCase().includes(q));
-      return name.toLowerCase().includes(q) || aliasMatch;
+      return !q || name.toLowerCase().includes(q) || aliasMatch;
     });
     if (!matches.length) {
       hideSuggestions();
       return;
     }
     suggestBox.innerHTML = "";
+
+    const head = document.createElement("div");
+    head.className = "game-picker-head";
+    const title = document.createElement("span");
+    title.textContent = "Choose your games";
+    const actions = document.createElement("span");
+    actions.className = "game-picker-actions";
+    const count = document.createElement("span");
+    count.textContent = `${selectedGameNames().length}/${SUGGEST_ORDER.length} selected`;
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "game-picker-close";
+    close.setAttribute("aria-label", "Close game picker");
+    close.innerHTML = '<i class="bi bi-x-lg"></i>';
+    close.addEventListener("click", () => {
+      hideSuggestions();
+      suppressSuggestionOpen = true;
+      input.focus();
+    });
+    actions.append(count, close);
+    head.append(title, actions);
+    suggestBox.appendChild(head);
+
     matches.forEach((name) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "suggest-item";
-      btn.textContent = name;
-      btn.addEventListener("click", () => applyGamePack(name));
-      suggestBox.appendChild(btn);
+      const pack = GAME_PACKS[name];
+      const option = document.createElement("label");
+      option.className = "suggest-item game-option";
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = selectedGames.has(name);
+      checkbox.dataset.game = name;
+      checkbox.setAttribute("aria-label", `Select ${name}`);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) {
+          const scrollTop = suggestBox.scrollTop;
+          selectGame(name);
+          input.value = "";
+          updateSuggestions();
+          const replacement = [...suggestBox.querySelectorAll("input[data-game]")].find(
+            (candidate) => candidate.dataset.game === name
+          );
+          if (replacement) {
+            replacement.focus({ preventScroll: true });
+            suggestBox.scrollTop = scrollTop;
+          }
+          return;
+        }
+        confirmDeselectGame(name).then((removed) => {
+          if (!removed) checkbox.checked = true;
+        });
+      });
+
+      const copy = document.createElement("span");
+      copy.className = "game-option-copy";
+      const gameName = document.createElement("span");
+      gameName.className = "game-option-name";
+      gameName.textContent = name;
+      const activityCount =
+        (pack.dailies || []).length + (pack.weeklies || []).length + (pack.schedules || []).length;
+      const detail = document.createElement("span");
+      detail.className = "game-option-detail";
+      detail.textContent = `${activityCount} activities`;
+      copy.append(gameName, detail);
+
+      option.append(checkbox, gameIconEl(name, "game-option-icon"), copy);
+      suggestBox.appendChild(option);
     });
     suggestBox.classList.remove("d-none");
+    input.setAttribute("aria-expanded", "true");
   }
 
   function hideSuggestions() {
     suggestBox.classList.add("d-none");
     suggestBox.innerHTML = "";
+    input.setAttribute("aria-expanded", "false");
   }
 
   function packActivityDefinitions(pack) {
@@ -727,6 +1164,8 @@
       weekday: null,
       monthDay: null,
       game,
+      seriesId: uid(),
+      packTask: true,
       createdAt: Date.now(),
     };
 
@@ -773,31 +1212,53 @@
     return added.length;
   }
 
-  // Adds every missing activity in a game pack. This also avoids duplicate pack
-  // tasks when a suggestion is selected a second time.
-  function applyGamePack(name) {
-    if (addMissingGamePackActivities(name)) {
+  function selectGame(name) {
+    if (!GAME_PACKS[name]) return;
+    selectedGames.add(name);
+    addMissingGamePackActivities(name);
+    saveSelectedGames();
+    save();
+    syncProgressOccurrences();
+    render();
+  }
+
+  function confirmDeselectGame(name) {
+    return showDialog({
+      title: `Remove ${name}?`,
+      body: `This removes ${name}'s tasks, character reminder state, and saved progress from this browser.`,
+      okLabel: "Remove game",
+    }).then((ok) => {
+      if (!ok) return false;
+      selectedGames.delete(name);
+      tasks = tasks.filter((task) => !(task.packTask && task.game === name));
+      progressHistory = progressHistory.filter((entry) => entry.game !== name);
+      Object.keys(completedCharacters).forEach((key) => {
+        try {
+          if (JSON.parse(key)[0] === name) delete completedCharacters[key];
+        } catch {}
+      });
+      Object.keys(dismissedTodayReminders).forEach((key) => {
+        try {
+          if (JSON.parse(key)[0] === name) delete dismissedTodayReminders[key];
+        } catch {}
+      });
+      saveSelectedGames();
+      saveProgressHistory();
+      saveCompletedCharacters();
+      saveDismissedTodayReminders();
       save();
       render();
-    }
-    hideSuggestions();
-    input.value = "";
-    input.focus();
+      return true;
+    });
   }
 
   /* ---------- game tasks ----------
    * Tasks added from a game pack are grouped into a per-game box. */
 
-  // Resolves which game pack a task belongs to (stored `game`, or the
-  // "<Game> · " text prefix for older / hand-entered tasks). Null if none.
+  // Game ownership is explicit. Personal tasks that happen to begin with a
+  // game's name must remain personal when that game is deselected.
   function gameOf(task) {
-    if (task.game && GAME_PACKS[task.game]) return task.game;
-    const i = task.text.indexOf(" · ");
-    if (i > 0) {
-      const name = task.text.slice(0, i);
-      if (GAME_PACKS[name]) return name;
-    }
-    return null;
+    return task.game && GAME_PACKS[task.game] ? task.game : null;
   }
 
   // Display text without the "<Game> · " prefix (the box header already shows it).
@@ -835,6 +1296,91 @@
     return end ? `Expires ${formatLong(end)}` : "";
   }
 
+  /* ---------- progress history ----------
+   * Task rows are disposable UI state; these compact occurrence records retain
+   * twelve months of completed/missed/pending outcomes for the charts. */
+
+  function taskProgressStart(task, start) {
+    if (start || task.date) return start || task.date;
+    if (task.progressStart) return task.progressStart;
+    const created = new Date(task.createdAt || Date.now());
+    return toKey(created);
+  }
+
+  function occurrenceId(task, start) {
+    return `${task.seriesId || task.id}::${taskProgressStart(task, start)}`;
+  }
+
+  function writeProgressStatus(task, status, start, completedAt, force) {
+    const scheduledStart = taskProgressStart(task, start);
+    const id = occurrenceId(task, scheduledStart);
+    const seriesId = task.seriesId || task.id;
+    progressHistory.forEach((entry) => {
+      if (entry.seriesId === seriesId && entry.repeat === undefined) {
+        entry.repeat = task.repeat || null;
+      }
+    });
+    let record = progressHistory.find((entry) => entry.id === id);
+    if (!record) {
+      const game = gameOf(task);
+      record = {
+        id,
+        seriesId,
+        game,
+        activity: game ? activityLabel(task, game) : task.text,
+        repeat: task.repeat || null,
+        scheduledStart,
+        scheduledEnd: periodEndKey(task, scheduledStart) || scheduledStart,
+        status: "pending",
+        completedAt: null,
+      };
+      progressHistory.push(record);
+    }
+    if (
+      force ||
+      (record.status !== "completed" && !(status === "pending" && record.status === "missed"))
+    ) {
+      record.status = status;
+      record.completedAt = status === "completed" ? completedAt || Date.now() : null;
+    }
+    return record;
+  }
+
+  function markMissed(task, start) {
+    writeProgressStatus(task, "missed", start, null, false);
+  }
+
+  function pruneProgressHistory() {
+    const cutoff = new Date();
+    cutoff.setHours(0, 0, 0, 0);
+    cutoff.setMonth(cutoff.getMonth() - 12);
+    const cutoffKey = toKey(cutoff);
+    progressHistory = progressHistory.filter((entry) => entry.scheduledStart >= cutoffKey);
+  }
+
+  function syncProgressOccurrences() {
+    const tKey = todayKey();
+    let tasksChanged = false;
+    tasks.forEach((task) => {
+      if (!task.seriesId) {
+        task.seriesId = task.id || uid();
+        tasksChanged = true;
+      }
+      const start = taskProgressStart(task);
+      if (start > tKey) return;
+      writeProgressStatus(
+        task,
+        task.done ? "completed" : "pending",
+        start,
+        task.completedAt,
+        false
+      );
+    });
+    pruneProgressHistory();
+    saveProgressHistory();
+    if (tasksChanged) save();
+  }
+
   // Scheduled monthly, interval, and patch tasks retain one current occurrence.
   // If a reset was missed, that occurrence is advanced instead of accumulating
   // overdue copies.
@@ -843,12 +1389,15 @@
     let changed = false;
     tasks.forEach((task) => {
       if (!task.managedSchedule || !task.date) return;
+      if (task.done) return;
 
       if (task.repeat === "patch") {
         if (task.date > tKey) return;
         const next = patchOccurrenceFor(gameOf(task), task.patchOffsetDays || 0, tKey);
         const hasChild = tasks.some((candidate) => candidate.spawnOf === task.id && !candidate.done);
+        if (periodEndKey(task) < tKey) markMissed(task, task.date);
         if (next && tKey >= next.start && next.start !== task.date && !hasChild) {
+          markMissed(task, task.date);
           task.date = next.start;
           task.periodEnd = next.end;
           task.done = false;
@@ -858,9 +1407,10 @@
         return;
       }
 
-      if (task.done || task.repeat === "weekly") return;
+      if (task.repeat === "weekly") return;
       let end = periodEndKey(task);
       while (end && tKey > end) {
+        markMissed(task, task.date);
         const next = nextOccurrenceKey(task.date, task);
         if (!next || next === task.date) break;
         task.date = next;
@@ -871,16 +1421,17 @@
     if (changed) save();
   }
 
-  // A single migration fills in new Gacha reminder.txt activities for game packs
-  // already saved in this browser. Existing tasks are left untouched.
-  function syncExistingGamePacks() {
-    if (localStorage.getItem(GAME_PACK_SYNC_KEY)) return;
-    const games = [...new Set(tasks.map(gameOf).filter(Boolean))];
+  function rollDailyTasks() {
+    const tKey = todayKey();
     let changed = false;
-    games.forEach((game) => {
-      if (addMissingGamePackActivities(game)) changed = true;
+    tasks.forEach((task) => {
+      if (task.repeat !== "daily" || task.done || !task.date) return;
+      while (task.date < tKey) {
+        markMissed(task, task.date);
+        task.date = addDaysKey(task.date, 1);
+        changed = true;
+      }
     });
-    localStorage.setItem(GAME_PACK_SYNC_KEY, "1");
     if (changed) save();
   }
 
@@ -893,13 +1444,25 @@
     tasks.forEach((t) => {
       if (t.repeat !== "weekly" || t.done || !t.date) return;
       const weekStart = weekStartKey(tKey, t.weekday ?? 1);
-      if (t.spawnOf) {
-        if (tKey > addDaysKey(t.date, 6)) {
-          t.date = weekStart;
-          changed = true;
-        }
-      } else if (t.date !== weekStart) {
-        t.date = weekStart;
+      while (t.date < weekStart) {
+        markMissed(t, t.date);
+        t.date = addDaysKey(t.date, 7);
+        changed = true;
+      }
+    });
+    if (changed) save();
+  }
+
+  function rollMonthlyTasks() {
+    const tKey = todayKey();
+    let changed = false;
+    tasks.forEach((task) => {
+      if (task.repeat !== "monthly" || task.managedSchedule || task.done || !task.date) return;
+      while (task.date < tKey) {
+        markMissed(task, task.date);
+        const next = nextOccurrenceKey(task.date, task);
+        if (!next || next === task.date) break;
+        task.date = next;
         changed = true;
       }
     });
@@ -999,7 +1562,7 @@
   // `game` links the task to a game pack (used to group it into a game box).
   function addTask(text, date, rep, game) {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed || (!rep && !date)) return false;
     const task = {
       id: uid(),
       text: trimmed,
@@ -1009,6 +1572,7 @@
       weekday: null,
       monthDay: null,
       game: game || null,
+      seriesId: uid(),
       createdAt: Date.now(),
     };
     if (rep) {
@@ -1029,6 +1593,7 @@
     tasks.unshift(task);
     save();
     render();
+    return true;
   }
 
   /* Creates the next occurrence of a completed recurring task and links it back
@@ -1040,6 +1605,8 @@
     const ref = keepsAnchor ? task.date : task.date && task.date > tKey ? task.date : tKey;
     const nextKey = nextOccurrenceKey(ref, task);
     if (!nextKey) return;
+    const seriesId = task.seriesId || task.id;
+    if (tasks.some((candidate) => candidate.seriesId === seriesId && candidate.date === nextKey)) return;
     tasks.unshift({
       id: uid(),
       text: task.text,
@@ -1049,6 +1616,8 @@
       weekday: task.weekday,
       monthDay: task.monthDay,
       game: gameOf(task),
+      seriesId,
+      packTask: task.packTask,
       intervalDays: task.intervalDays,
       anchorDate: task.anchorDate,
       managedSchedule: task.managedSchedule,
@@ -1063,10 +1632,27 @@
   /* Complete / un-complete a task (see header for the completion rules).
    * Un-completing a recurring task removes its spawned next occurrence. */
   function toggleTask(id) {
+    refreshOccurrences();
     const task = tasks.find((t) => t.id === id);
     if (!task) return;
 
     if (task.done) {
+      const start = taskProgressStart(task);
+      const hasLaterCompletion = progressHistory.some(
+        (entry) =>
+          entry.seriesId === (task.seriesId || task.id) &&
+          entry.scheduledStart > start &&
+          entry.status === "completed"
+      );
+      if (task.repeat && hasLaterCompletion) {
+        showDialog({
+          title: "Later progress already exists",
+          body: "This occurrence cannot be reopened because a later occurrence has already been completed.",
+          okLabel: "Got it",
+          cancel: false,
+        });
+        return;
+      }
       setDone(task, false);
       return;
     }
@@ -1099,18 +1685,34 @@
   }
 
   function setDone(task, done) {
+    const completedAt = done ? Date.now() : null;
     if (task.repeat) {
       if (done) {
         task.done = true;
+        task.completedAt = completedAt;
+        writeProgressStatus(task, "completed", taskProgressStart(task), completedAt, true);
         spawnNext(task);
       } else {
         task.done = false;
+        delete task.completedAt;
+        writeProgressStatus(task, "pending", taskProgressStart(task), null, true);
         const child = tasks.find((t) => t.spawnOf === task.id && !t.done);
-        if (child) tasks = tasks.filter((t) => t.id !== child.id);
+        if (child) {
+          progressHistory = progressHistory.filter((entry) => entry.id !== occurrenceId(child));
+          tasks = tasks.filter((t) => t.id !== child.id);
+        }
       }
     } else {
       task.done = done;
+      if (done) {
+        task.completedAt = completedAt;
+        writeProgressStatus(task, "completed", taskProgressStart(task), completedAt, true);
+      } else {
+        delete task.completedAt;
+        writeProgressStatus(task, "pending", taskProgressStart(task), null, true);
+      }
     }
+    saveProgressHistory();
     save();
     render();
   }
@@ -1137,27 +1739,101 @@
   }
 
   function finishRemove(id) {
-    if (!tasks.some((t) => t.id === id)) return;
+    const task = tasks.find((candidate) => candidate.id === id);
+    if (!task) return;
+    if (!task.done) {
+      progressHistory = progressHistory.filter((entry) => entry.id !== occurrenceId(task));
+      saveProgressHistory();
+    }
     tasks = tasks.filter((t) => t.id !== id);
     save();
     render();
   }
 
-  function clearCompleted() {
-    tasks = tasks.filter((t) => !t.done);
-    save();
-    render();
-  }
-
   function visibleTasks() {
-    if (filter === "active") return tasks.filter((t) => !t.done);
-    if (filter === "completed") return tasks.filter((t) => t.done);
-    return tasks;
+    const available = tasks.filter((task) => {
+      const game = gameOf(task);
+      return !game || selectedGames.has(game);
+    });
+    if (filter === "active") return available.filter((t) => !t.done);
+    if (filter === "completed") return available.filter((t) => t.done);
+    return available;
   }
 
   /* ---------- rendering ----------
    * buildTaskItem builds a full interactive row; buildProjectionItem builds a
    * read-only row used for future recurring occurrences shown in the calendar. */
+
+  function renamePersonalTask(id, text) {
+    const task = tasks.find((candidate) => candidate.id === id);
+    const trimmed = text.trim();
+    if (!task || gameOf(task) || !trimmed) return false;
+
+    const seriesId = task.seriesId || task.id;
+    tasks.forEach((candidate) => {
+      if (!gameOf(candidate) && (candidate.seriesId || candidate.id) === seriesId) {
+        candidate.text = trimmed;
+      }
+    });
+    progressHistory.forEach((entry) => {
+      if (!entry.game && entry.seriesId === seriesId) entry.activity = trimmed;
+    });
+    save();
+    saveProgressHistory();
+    render();
+    return true;
+  }
+
+  function beginTaskEdit(task, body, check, actions) {
+    check.disabled = true;
+    actions.classList.add("d-none");
+    body.innerHTML = "";
+
+    const form = document.createElement("form");
+    form.className = "task-edit-form";
+
+    const editInput = document.createElement("input");
+    editInput.type = "text";
+    editInput.className = "task-edit-input";
+    editInput.value = task.text;
+    editInput.maxLength = 160;
+    editInput.setAttribute("aria-label", "Edit task name");
+
+    const controls = document.createElement("div");
+    controls.className = "task-edit-controls";
+    const saveEdit = document.createElement("button");
+    saveEdit.type = "submit";
+    saveEdit.className = "task-edit-confirm";
+    saveEdit.setAttribute("aria-label", "Save task name");
+    saveEdit.innerHTML = '<i class="bi bi-check-lg"></i>';
+    const cancelEdit = document.createElement("button");
+    cancelEdit.type = "button";
+    cancelEdit.className = "task-edit-cancel";
+    cancelEdit.setAttribute("aria-label", "Cancel editing");
+    cancelEdit.innerHTML = '<i class="bi bi-x-lg"></i>';
+    controls.append(saveEdit, cancelEdit);
+    form.append(editInput, controls);
+    body.appendChild(form);
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (!editInput.value.trim()) {
+        editInput.setCustomValidity("Task name cannot be empty.");
+        editInput.reportValidity();
+        return;
+      }
+      renamePersonalTask(task.id, editInput.value);
+    });
+    editInput.addEventListener("input", () => editInput.setCustomValidity(""));
+    editInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      render();
+    });
+    cancelEdit.addEventListener("click", render);
+    editInput.focus();
+    editInput.select();
+  }
 
   function buildTaskItem(task, compact, label) {
     const li = document.createElement("li");
@@ -1231,7 +1907,20 @@
     del.innerHTML = '<i class="bi bi-x-lg"></i>';
     del.addEventListener("click", () => removeTask(task.id));
 
-    li.append(check, body, del);
+    if (!compact && !gameOf(task)) {
+      const actions = document.createElement("div");
+      actions.className = "task-row-actions";
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "task-edit";
+      edit.setAttribute("aria-label", `Edit ${task.text}`);
+      edit.innerHTML = '<i class="bi bi-pencil"></i>';
+      edit.addEventListener("click", () => beginTaskEdit(task, body, check, actions));
+      actions.append(edit, del);
+      li.append(check, body, actions);
+    } else {
+      li.append(check, body, del);
+    }
     return li;
   }
 
@@ -1264,15 +1953,14 @@
     return li;
   }
 
-  /* Calendar day list: folds every activity of one game into a single row that
-   * expands on click, so a busy day stays tidy. Open/closed state is kept in
-   * expandedCalGames (keyed by day + game) so it survives re-renders. */
+  /* Calendar day list: folds every activity of one game into a single row.
+   * Groups open by default now that daily and weekly entries are omitted. */
   function buildCalGameGroup(game, items) {
     const wrap = document.createElement("li");
     wrap.className = "cal-game";
 
     const key = `${selectedKey}::${game}`;
-    const open = expandedCalGames.has(key);
+    const open = !collapsedCalGames.has(key);
 
     const head = document.createElement("button");
     head.type = "button";
@@ -1302,8 +1990,8 @@
 
     head.addEventListener("click", () => {
       const nowOpen = !body.classList.toggle("d-none");
-      if (nowOpen) expandedCalGames.add(key);
-      else expandedCalGames.delete(key);
+      if (nowOpen) collapsedCalGames.delete(key);
+      else collapsedCalGames.add(key);
       head.classList.toggle("is-open", nowOpen);
       head.setAttribute("aria-expanded", String(nowOpen));
     });
@@ -1347,7 +2035,7 @@
   function monthMeta(monthStart, monthEnd) {
     const events = {};
     const chars = {};
-    Object.keys(GAME_META_DATA).forEach((game) => {
+    selectedGameNames().forEach((game) => {
       gamePatchEvents(game).forEach((e) => {
         if (e.end < monthStart || e.start > monthEnd) return;
         let day = e.start < monthStart ? monthStart : e.start;
@@ -1413,14 +2101,460 @@
     return li;
   }
 
-  /* Full re-render of the whole UI. Game-pack tasks are grouped into per-game
-   * boxes (top); every other task is split into Recurring (left) and One-time
+  /* ---------- progress visuals ---------- */
+
+  function completionDateKey(task) {
+    return task.completedAt ? toKey(new Date(task.completedAt)) : null;
+  }
+
+  function currentTasksForToday() {
+    const tKey = todayKey();
+    return tasks.filter((task) => {
+      const game = gameOf(task);
+      if (game && !selectedGames.has(game)) return false;
+      if (task.repeat === "weekly" || task.managedSchedule) return occursDuringPeriod(task, tKey);
+      if (task.repeat === "daily") return task.date === tKey;
+      if (task.date) {
+        if (task.done) return task.date === tKey || completionDateKey(task) === tKey;
+        return task.date <= tKey;
+      }
+      return task.done ? completionDateKey(task) === tKey : true;
+    });
+  }
+
+  function tasksForDayProgress(key) {
+    const tKey = todayKey();
+    if (key !== tKey) {
+      const recorded = progressHistory.filter((entry) => {
+        if (entry.repeat !== "daily" || entry.scheduledStart !== key) return false;
+        return !entry.game || selectedGames.has(entry.game);
+      });
+      if (key < tKey) return recorded;
+
+      const recordedSeries = new Set(recorded.map((entry) => entry.seriesId));
+      const projected = new Map();
+      tasks.forEach((task) => {
+        const game = gameOf(task);
+        const seriesId = task.seriesId || task.id;
+        if (
+          task.repeat !== "daily" ||
+          task.done ||
+          !task.date ||
+          task.date > key ||
+          (game && !selectedGames.has(game)) ||
+          recordedSeries.has(seriesId) ||
+          projected.has(seriesId)
+        ) return;
+        projected.set(seriesId, {
+          id: `${seriesId}::${key}`,
+          seriesId,
+          game,
+          activity: game ? activityLabel(task, game) : task.text,
+          repeat: "daily",
+          scheduledStart: key,
+          status: "pending",
+        });
+      });
+      return [...recorded, ...projected.values()];
+    }
+
+    const current = currentTasksForToday().filter((task) => task.repeat === "daily");
+    const currentIds = new Set(current.map((task) => occurrenceId(task)));
+    const retainedCompletions = progressHistory.filter((entry) => {
+      if (
+        entry.repeat !== "daily" ||
+        entry.status !== "completed" ||
+        currentIds.has(entry.id)
+      ) return false;
+      if (entry.game && !selectedGames.has(entry.game)) return false;
+      return entry.scheduledStart === tKey;
+    });
+    return [...current, ...retainedCompletions];
+  }
+
+  function progressStats(entries) {
+    const total = entries.length;
+    const completed = entries.filter((entry) =>
+      entry.done !== undefined ? entry.done : entry.status === "completed"
+    ).length;
+    return { total, completed, percent: total ? Math.round((completed / total) * 100) : 0 };
+  }
+
+  function historyInRange(start, end) {
+    return progressHistory.filter(
+      (entry) => entry.scheduledStart >= start && entry.scheduledStart <= end
+    );
+  }
+
+  function makeProgressEmpty(message) {
+    const empty = document.createElement("div");
+    empty.className = "progress-empty";
+    empty.innerHTML = '<i class="bi bi-bar-chart-line"></i>';
+    const text = document.createElement("span");
+    text.textContent = message;
+    empty.appendChild(text);
+    return empty;
+  }
+
+  function renderDayProgress(entries, key) {
+    const stats = progressStats(entries);
+    const complete = stats.total > 0 && stats.completed === stats.total;
+    const isToday = key === todayKey();
+    const layout = document.createElement("div");
+    layout.className = "day-progress";
+
+    const ring = document.createElement("div");
+    ring.className = "progress-ring" + (complete ? " is-complete" : "");
+    ring.style.setProperty("--progress", `${stats.percent * 3.6}deg`);
+    ring.setAttribute("role", "img");
+    ring.setAttribute(
+      "aria-label",
+      `${stats.percent}% complete, ${stats.completed} of ${stats.total} daily tasks`
+    );
+    const ringCore = document.createElement("div");
+    ringCore.className = "progress-ring-core";
+    if (complete) {
+      const tick = document.createElement("i");
+      tick.className = "bi bi-check-lg progress-complete-tick";
+      tick.setAttribute("aria-hidden", "true");
+      ringCore.appendChild(tick);
+    }
+    const percent = document.createElement("strong");
+    percent.textContent = `${stats.percent}%`;
+    const fraction = document.createElement("span");
+    fraction.textContent = `${stats.completed}/${stats.total}`;
+    ringCore.append(percent, fraction);
+    ring.appendChild(ringCore);
+
+    const copy = document.createElement("div");
+    copy.className = "progress-copy";
+    const title = document.createElement("h3");
+    title.textContent = complete
+      ? "All dailies complete"
+      : stats.total
+        ? isToday ? "Today's dailies" : "Dailies for this day"
+        : isToday ? "No dailies today" : "No dailies on this day";
+    const detail = document.createElement("p");
+    detail.textContent = complete
+      ? "Everything scheduled daily is checked off."
+      : stats.total
+        ? `${stats.total - stats.completed} daily task${stats.total - stats.completed === 1 ? "" : "s"} remaining across your active lists.`
+        : "Select a game or add a repeating daily task to begin tracking momentum.";
+    copy.append(title, detail);
+    layout.append(ring, copy);
+    progressVisual.appendChild(layout);
+    return stats;
+  }
+
+  function renderWeekProgress(entries, start, selected) {
+    const chart = document.createElement("div");
+    chart.className = "week-progress";
+    chart.setAttribute("aria-hidden", "true");
+    const summary = document.createElement("ul");
+    summary.className = "visually-hidden";
+    const tKey = todayKey();
+    const labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+    for (let i = 0; i < 7; i++) {
+      const key = addDaysKey(start, i);
+      const dayEntries = entries.filter((entry) => entry.scheduledStart === key);
+      const stats = progressStats(dayEntries);
+      const column = document.createElement("div");
+      column.className = "week-progress-day" +
+        (key > tKey ? " is-future" : "") +
+        (key === selected ? " is-selected" : "");
+      column.title = `${formatLong(key)} · ${stats.completed}/${stats.total} completed`;
+
+      const value = document.createElement("span");
+      value.className = "week-progress-value";
+      value.textContent = stats.total ? `${stats.percent}%` : "–";
+      const track = document.createElement("div");
+      track.className = "week-progress-track";
+      const fill = document.createElement("span");
+      fill.className = "week-progress-fill";
+      fill.style.setProperty("--bar-scale", String(stats.percent / 100));
+      track.appendChild(fill);
+      const day = document.createElement("span");
+      day.className = "week-progress-label";
+      day.textContent = labels[i];
+      column.append(value, track, day);
+      chart.appendChild(column);
+
+      const summaryItem = document.createElement("li");
+      summaryItem.textContent = `${formatLong(key)}: ${stats.completed} of ${stats.total} completed`;
+      summary.appendChild(summaryItem);
+    }
+    progressVisual.append(chart, summary);
+    return progressStats(entries);
+  }
+
+  function renderMonthProgress(entries, year, month, selected) {
+    const wrap = document.createElement("div");
+    wrap.className = "month-progress-wrap";
+    const grid = document.createElement("div");
+    grid.className = "month-progress";
+    grid.setAttribute("aria-hidden", "true");
+    const summary = document.createElement("ul");
+    summary.className = "visually-hidden";
+    ["M", "T", "W", "T", "F", "S", "S"].forEach((label) => {
+      const weekday = document.createElement("span");
+      weekday.className = "month-progress-weekday";
+      weekday.textContent = label;
+      grid.appendChild(weekday);
+    });
+
+    const first = new Date(year, month, 1);
+    const offset = (first.getDay() + 6) % 7;
+    const days = new Date(year, month + 1, 0).getDate();
+    const tKey = todayKey();
+    for (let i = 0; i < offset; i++) {
+      const blank = document.createElement("span");
+      blank.className = "month-progress-blank";
+      grid.appendChild(blank);
+    }
+    for (let day = 1; day <= days; day++) {
+      const key = toKey(new Date(year, month, day));
+      const dayEntries = entries.filter((entry) => entry.scheduledStart === key);
+      const stats = progressStats(dayEntries);
+      const level = !stats.total ? 0 : stats.percent === 100 ? 4 : stats.percent >= 67 ? 3 : stats.percent >= 34 ? 2 : 1;
+      const cell = document.createElement("span");
+      cell.className = `month-progress-day level-${level}` +
+        (key === tKey ? " is-today" : "") +
+        (key > tKey ? " is-future" : "") +
+        (key === selected ? " is-selected" : "");
+      cell.textContent = day;
+      cell.title = `${formatLong(key)} · ${stats.completed}/${stats.total} completed`;
+      cell.setAttribute("aria-label", cell.title);
+      grid.appendChild(cell);
+      if (stats.total) {
+        const summaryItem = document.createElement("li");
+        summaryItem.textContent = `${formatLong(key)}: ${stats.completed} of ${stats.total} completed`;
+        summary.appendChild(summaryItem);
+      }
+    }
+
+    const legend = document.createElement("div");
+    legend.className = "month-progress-legend";
+    legend.append(document.createTextNode("Less"));
+    for (let level = 0; level <= 4; level++) {
+      const swatch = document.createElement("span");
+      swatch.className = `level-${level}`;
+      legend.appendChild(swatch);
+    }
+    legend.append(document.createTextNode("More"));
+    wrap.append(grid, legend);
+    progressVisual.append(wrap, summary);
+    return progressStats(entries);
+  }
+
+  function renderProgressBreakdown(entries) {
+    progressBreakdown.innerHTML = "";
+    if (!entries.length) return;
+
+    const title = document.createElement("h3");
+    title.textContent = "By list";
+    progressBreakdown.appendChild(title);
+
+    const groups = [];
+    selectedGameNames().forEach((game) => {
+      const items = entries.filter((entry) =>
+        entry.game !== undefined ? entry.game === game : gameOf(entry) === game
+      );
+      if (items.length) groups.push({ name: game, game, items });
+    });
+    const personal = entries.filter((entry) =>
+      entry.game !== undefined ? !entry.game : !gameOf(entry)
+    );
+    if (personal.length) groups.push({ name: "Personal", game: null, items: personal });
+
+    groups.forEach((group) => {
+      const stats = progressStats(group.items);
+      const gameComplete =
+        progressRange === "day" && group.game && stats.total && stats.completed === stats.total;
+      const row = document.createElement("div");
+      row.className = "progress-breakdown-row";
+      const identity = document.createElement("span");
+      identity.className = "progress-breakdown-name";
+      if (group.game) identity.appendChild(gameIconEl(group.game, "progress-game-icon"));
+      else {
+        const icon = document.createElement("i");
+        icon.className = "bi bi-person progress-game-icon";
+        identity.appendChild(icon);
+      }
+      identity.appendChild(document.createTextNode(group.name));
+
+      const track = document.createElement("span");
+      track.className = "progress-breakdown-track";
+      const fill = document.createElement("span");
+      fill.className = "progress-breakdown-fill";
+      fill.style.setProperty("--bar-scale", String(stats.percent / 100));
+      track.appendChild(fill);
+      const value = document.createElement("span");
+      value.className = "progress-breakdown-value";
+      value.textContent = `${stats.completed}/${stats.total}`;
+      if (gameComplete) {
+        const complete = document.createElement("i");
+        complete.className = "bi bi-check-lg progress-list-complete";
+        complete.setAttribute("aria-label", "All dailies complete");
+        value.appendChild(complete);
+      }
+      row.append(identity, track, value);
+
+      if (group.game) {
+        const taskSummary = new Map();
+        group.items.forEach((entry) => {
+          const name = entry.activity || (entry.text ? activityLabel(entry, group.game) : "Unnamed task");
+          const item = taskSummary.get(name) || { total: 0, completed: 0 };
+          item.total++;
+          if (entry.done !== undefined ? entry.done : entry.status === "completed") item.completed++;
+          taskSummary.set(name, item);
+        });
+
+        const details = document.createElement("div");
+        details.className = "progress-task-details";
+        const detailTitle = document.createElement("strong");
+        detailTitle.textContent = "Tasks in this period";
+        const detailList = document.createElement("ul");
+        taskSummary.forEach((item, name) => {
+          const detail = document.createElement("li");
+          const status = document.createElement("i");
+          status.className = `bi ${item.completed === item.total ? "bi-check-circle-fill" : "bi-circle"}`;
+          const label = document.createElement("span");
+          label.textContent = name;
+          const count = document.createElement("small");
+          count.textContent = `${item.completed}/${item.total}`;
+          detail.append(status, label, count);
+          detailList.appendChild(detail);
+        });
+        details.append(detailTitle, detailList);
+        row.classList.add("has-task-details");
+        row.tabIndex = 0;
+        row.setAttribute("aria-label", `${group.name}: ${stats.completed} of ${stats.total} complete. Focus to show tasks.`);
+        row.appendChild(details);
+      }
+      progressBreakdown.appendChild(row);
+    });
+  }
+
+  function renderProgress() {
+    progressVisual.innerHTML = "";
+    progressBreakdown.innerHTML = "";
+    progressTabs.querySelectorAll("[data-progress-range]").forEach((button) => {
+      const active = button.dataset.progressRange === progressRange;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+
+    const focusKey = selectedKey;
+    let entries;
+    let stats;
+    if (progressRange === "day") {
+      entries = tasksForDayProgress(focusKey);
+      progressRangeLabel.textContent = formatLong(focusKey);
+      stats = renderDayProgress(entries, focusKey);
+    } else if (progressRange === "week") {
+      const start = weekStartKey(focusKey, 1);
+      const end = addDaysKey(start, 6);
+      entries = historyInRange(start, end);
+      progressRangeLabel.textContent = `${formatShort(start)}–${formatShort(end)}`;
+      stats = renderWeekProgress(entries, start, focusKey);
+    } else {
+      const selected = fromKey(focusKey);
+      const start = toKey(new Date(selected.getFullYear(), selected.getMonth(), 1));
+      const end = toKey(new Date(selected.getFullYear(), selected.getMonth() + 1, 0));
+      entries = historyInRange(start, end);
+      progressRangeLabel.textContent = selected.toLocaleDateString(undefined, {
+        month: "long",
+        year: "numeric",
+      });
+      stats = renderMonthProgress(entries, selected.getFullYear(), selected.getMonth(), focusKey);
+    }
+
+    if (!entries.length && progressRange !== "day") {
+      progressVisual.prepend(makeProgressEmpty("No progress has been recorded for this period yet."));
+    }
+    renderProgressBreakdown(entries);
+    progressLabel.textContent = `${stats.percent}% ${progressRange}`;
+  }
+
+  function renderTodayCharacterReminders() {
+    const tKey = todayKey();
+    let dismissalsChanged = false;
+    Object.keys(dismissedTodayReminders).forEach((key) => {
+      if (dismissedTodayReminders[key] !== tKey) {
+        delete dismissedTodayReminders[key];
+        dismissalsChanged = true;
+      }
+    });
+    if (dismissalsChanged) saveDismissedTodayReminders();
+
+    const releases = [];
+    selectedGameNames().forEach((game) => {
+      gameCharacters(game).forEach((character) => {
+        if (character.date !== tKey) return;
+        const key = characterReminderKey(game, character);
+        if (completedCharacters[key] || dismissedTodayReminders[key]) return;
+        releases.push({ game, character, key });
+      });
+    });
+    releases.sort(
+      (a, b) =>
+        SUGGEST_ORDER.indexOf(a.game) - SUGGEST_ORDER.indexOf(b.game) ||
+        a.character.name.localeCompare(b.character.name)
+    );
+
+    todayReminders.innerHTML = "";
+    todayReminders.classList.toggle("d-none", releases.length === 0);
+    releases.forEach(({ game, character, key }) => {
+      const reminder = document.createElement("section");
+      reminder.className = "today-reminder";
+
+      const portrait = characterPortraitEl(
+        game,
+        character,
+        "character-portrait today-reminder-portrait"
+      );
+      const body = document.createElement("div");
+      body.className = "today-reminder-body";
+      const kicker = document.createElement("span");
+      kicker.className = "today-reminder-kicker";
+      kicker.textContent = `Releases today · ${game}`;
+      const title = document.createElement("strong");
+      title.className = "today-reminder-title";
+      title.textContent = `${character.name} is available today`;
+      body.append(kicker, title);
+
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "today-reminder-close";
+      close.setAttribute("aria-label", `Dismiss ${character.name} release reminder`);
+      close.innerHTML = '<i class="bi bi-x-lg"></i>';
+      close.addEventListener("click", () => {
+        dismissedTodayReminders[key] = tKey;
+        saveDismissedTodayReminders();
+        renderTodayCharacterReminders();
+      });
+
+      reminder.append(portrait, body, close);
+      todayReminders.appendChild(reminder);
+    });
+  }
+
+  /* Full re-render of the whole UI. Personal tasks are split into Recurring
+   * (left) and One-time (right), followed by grouped game-pack activity boxes.
    * (right). Future recurring occurrences are excluded from the lists both to
    * reduce clutter and so a task completed for today doesn't keep showing as
    * active — the calendar is where they stay visible until the day arrives. */
-  function render() {
+  function refreshOccurrences() {
+    rollDailyTasks();
     rollWeeklyTasks();
+    rollMonthlyTasks();
     rollManagedSchedules();
+    syncProgressOccurrences();
+  }
+
+  function render() {
+    refreshOccurrences();
     const tKey = todayKey();
     const visible = visibleTasks();
 
@@ -1485,44 +2619,35 @@
       }
     }
 
-    const tracked = tasks.filter((t) => {
-      if (t.repeat && t.date && t.date > tKey) return false;
-      return !t.managedSchedule || occursDuringPeriod(t, tKey);
-    });
-    const remaining = tracked.filter((t) => !t.done).length;
+    const tracked = currentTasksForToday();
+    const todayStats = progressStats(tracked);
+    const remaining = todayStats.total - todayStats.completed;
     counter.textContent = `${remaining} task${remaining === 1 ? "" : "s"} left`;
 
-    const done = tracked.length - remaining;
-    const pct = tracked.length ? Math.round((done / tracked.length) * 100) : 0;
-    progressLabel.textContent = `${pct}% done`;
-    clearBtn.disabled = done === 0;
-    clearBtn.classList.toggle("disabled", done === 0);
-
+    renderTodayCharacterReminders();
+    renderProgress();
     renderCalendar();
     if (view === "reminders") renderReminders();
   }
 
   /* ---------- calendar ----------
-   * Shows only ACTIVE tasks. Pass 1 counts non-recurring tasks on their exact
-   * date. Pass 2 "projects" each active recurring task forward across the month
-   * (via nextOccurrenceKey) so upcoming days get dots too. A weekly spans its
-   * whole Monday→Sunday week (every day of that week is marked). */
+   * Daily and weekly activities are omitted. One-time and longer-cycle recurring
+   * tasks appear only on their occurrence start date. */
 
-  // Whether an active task "occurs" on a given day. Weeklies cover their whole
-  // Mon→Sun week, so they show (and can be checked off) any day that week.
+  // Calendar rows represent schedule starts, not the full availability window.
   function occursOn(task, key) {
-    if (!task.date) return false;
-    if (task.repeat === "weekly" || task.managedSchedule) return occursDuringPeriod(task, key);
-    return task.date === key;
+    return !!task.date && !["daily", "weekly"].includes(task.repeat) && task.date === key;
   }
 
   function renderCalendar() {
+    calDateJump.value = selectedKey;
     calTitle.textContent = new Date(calYear, calMonth, 1).toLocaleDateString(undefined, {
       month: "long",
       year: "numeric",
     });
 
-    const counts = {};
+    const gameCounts = {};
+    const personalCounts = {};
     const onDate = {};
     const monthStart = toKey(new Date(calYear, calMonth, 1));
     const monthEnd = toKey(new Date(calYear, calMonth + 1, 0));
@@ -1532,33 +2657,33 @@
     const dayEvents = metaMaps.events;
     const dayChars = metaMaps.chars;
 
-    const bump = (key) => {
-      counts[key] = (counts[key] || 0) + 1;
+    const bump = (key, task) => {
+      const categoryCounts = gameOf(task) ? gameCounts : personalCounts;
+      categoryCounts[key] = (categoryCounts[key] || 0) + 1;
       onDate[key] = onDate[key] || [];
     };
 
     tasks.forEach((t) => {
-      if (!t.date || t.done || t.repeat) return;
-      bump(t.date);
+      if (!t.date || t.repeat || (t.done && gameOf(t))) return;
+      bump(t.date, t);
+      onDate[t.date].push(t);
+    });
+
+    // Completed personal recurring occurrences remain visible on their actual
+    // calendar date, while game recurrence projections stay uncluttered.
+    tasks.forEach((t) => {
+      if (!t.date || !t.done || !t.repeat || gameOf(t)) return;
+      bump(t.date, t);
       onDate[t.date].push(t);
     });
 
     tasks.forEach((t) => {
-      if (!t.repeat || t.done || !t.date) return;
+      if (!t.repeat || ["daily", "weekly"].includes(t.repeat) || t.done || !t.date) return;
       let cursor = t.date;
       for (let i = 0; i < 4000; i++) {
         if (!cursor || cursor > monthEnd) break;
-        const periodEnd = periodEndKey(t, cursor);
-        if (t.repeat === "weekly" || (t.managedSchedule && periodEnd && periodEnd !== cursor)) {
-          // Weekly and reset-window activities stay active through their next reset.
-          for (let day = cursor; day <= periodEnd; day = addDaysKey(day, 1)) {
-            if (day < monthStart) continue;
-            if (day > monthEnd) break;
-            bump(day);
-            onDate[day].push(t);
-          }
-        } else if (cursor >= monthStart) {
-          bump(cursor);
+        if (cursor >= monthStart) {
+          bump(cursor, t);
           onDate[cursor].push(t);
         }
         const next = nextOccurrenceKey(cursor, t);
@@ -1585,9 +2710,10 @@
       btn.className = "cal-day";
       btn.innerHTML =
         `<span>${d}</span>` +
-        `<span class="cal-dots">` +
-        `<span class="cal-dot dot-task"></span>` +
-        `<span class="cal-dot dot-event"></span>` +
+         `<span class="cal-dots">` +
+         `<span class="cal-dot dot-task"></span>` +
+         `<span class="cal-dot dot-personal"></span>` +
+         `<span class="cal-dot dot-event"></span>` +
         `<span class="cal-dot dot-char"></span>` +
         `</span>`;
       btn.setAttribute("aria-label", formatLong(key));
@@ -1597,28 +2723,40 @@
       const evs = dayEvents[key] || [];
       const chs = dayChars[key] || [];
       const parts = [];
-      if (counts[key]) parts.push(`${counts[key]} task${counts[key] === 1 ? "" : "s"}`);
+      if (gameCounts[key]) {
+        parts.push(`${gameCounts[key]} game activit${gameCounts[key] === 1 ? "y" : "ies"}`);
+      }
+      if (personalCounts[key]) {
+        parts.push(`${personalCounts[key]} personal task${personalCounts[key] === 1 ? "" : "s"}`);
+      }
       if (evs.length) parts.push(evs[0].name);
       if (chs.length) parts.push(`${chs.length} new character${chs.length === 1 ? "" : "s"}`);
-      if (counts[key]) btn.classList.add("has-tasks");
+      if (gameCounts[key]) btn.classList.add("has-tasks");
+      if (personalCounts[key]) btn.classList.add("has-personal");
       if (evs.length) btn.classList.add("has-events");
       if (chs.length) btn.classList.add("has-characters");
-      if (parts.length) btn.title = parts.join(" · ");
+      if (parts.length) {
+        btn.title = parts.join(" · ");
+        btn.setAttribute("aria-label", `${formatLong(key)} · ${parts.join(" · ")}`);
+      }
 
       btn.addEventListener("click", () => {
         selectedKey = key;
         renderCalendar();
+        renderProgress();
       });
       calDays.appendChild(btn);
     }
 
     calSelectedLabel.textContent = formatLong(selectedKey);
     // Character releases + patch events for the selected day (pinned at top),
-    // then active tasks that occur that day (a weekly covers its whole week)
-    // plus read-only projections for future recurrences.
+    // then tasks whose occurrence starts that day and future projections.
     const selChars = dayChars[selectedKey] || [];
     const selEvents = dayEvents[selectedKey] || [];
-    const dayTasks = tasks.filter((t) => !t.done && occursOn(t, selectedKey));
+    const dayTasks = tasks.filter((t) =>
+      (!t.done && occursOn(t, selectedKey)) ||
+      (t.done && !gameOf(t) && t.date === selectedKey)
+    );
     const projected = (onDate[selectedKey] || []).filter(
       (t) => t.repeat && !dayTasks.some((s) => s.id === t.id)
     );
@@ -1671,21 +2809,27 @@
 
   // Subtract one and bump to previous month (handles January -> December).
   calPrev.addEventListener("click", () => {
+    const day = fromKey(selectedKey).getDate();
     calMonth--;
     if (calMonth < 0) {
       calMonth = 11;
       calYear--;
     }
+    selectedKey = monthlyKey(calYear, calMonth, day);
     renderCalendar();
+    renderProgress();
   });
 
   calNext.addEventListener("click", () => {
+    const day = fromKey(selectedKey).getDate();
     calMonth++;
     if (calMonth > 11) {
       calMonth = 0;
       calYear++;
     }
+    selectedKey = monthlyKey(calYear, calMonth, day);
     renderCalendar();
+    renderProgress();
   });
 
   calToday.addEventListener("click", () => {
@@ -1694,6 +2838,20 @@
     calMonth = d.getMonth();
     selectedKey = toKey(d);
     renderCalendar();
+    renderProgress();
+  });
+
+  calDateJump.addEventListener("change", () => {
+    if (!calDateJump.value) {
+      calDateJump.value = selectedKey;
+      return;
+    }
+    const date = fromKey(calDateJump.value);
+    calYear = date.getFullYear();
+    calMonth = date.getMonth();
+    selectedKey = calDateJump.value;
+    renderCalendar();
+    renderProgress();
   });
 
   calForm.addEventListener("submit", (e) => {
@@ -1731,31 +2889,24 @@
     return next ? addDaysKey(next.date, -1) : null;
   }
 
-  function appendCharacterGroups(entries, completed) {
-    entries.forEach(({ game, character, end }) => {
-      const groupKey = `${game}-${completed}`;
-      let group = [...remindersView.querySelectorAll(".reminder-group")].find(
-        (candidate) => candidate.dataset.reminderGroup === groupKey
-      );
-      if (!group) {
-        group = document.createElement("section");
-        group.className = "reminder-group";
-        group.dataset.reminderGroup = groupKey;
+  function appendCharacterList(entries, groupByEnd) {
+    const list = document.createElement("ul");
+    list.className = "list-unstyled reminder-timeline mb-0";
+    let previousDate = null;
 
-        const ghead = document.createElement("h2");
-        ghead.className = "reminder-group-head";
-        ghead.append(gameIconEl(game, "reminder-game-icon"));
-        const gname = document.createElement("span");
-        gname.textContent = game;
-        ghead.appendChild(gname);
-        group.appendChild(ghead);
-
-        const ul = document.createElement("ul");
-        ul.className = "list-unstyled mb-0";
-        group.appendChild(ul);
-        remindersView.appendChild(group);
+    entries.forEach(({ game, character, end, completed }) => {
+      const headingKey = groupByEnd ? end || "unknown" : character.date;
+      if (headingKey !== previousDate) {
+        const dateHead = document.createElement("li");
+        dateHead.className = "reminder-date-head";
+        dateHead.textContent = groupByEnd
+          ? end
+            ? `Ends ${formatLong(end)}`
+            : "No known end date"
+          : formatLong(character.date);
+        list.appendChild(dateHead);
+        previousDate = headingKey;
       }
-
       const li = document.createElement("li");
       li.className = "reminder-item is-char" + (completed ? " is-done" : "");
 
@@ -1769,6 +2920,7 @@
         if (check.checked) completedCharacters[key] = Date.now();
         else delete completedCharacters[key];
         saveCompletedCharacters();
+        renderTodayCharacterReminders();
         renderReminders();
       });
 
@@ -1785,53 +2937,89 @@
       title.textContent = character.name;
       const meta = document.createElement("span");
       meta.className = "reminder-meta";
-      meta.textContent = completed
+      meta.appendChild(gameIconEl(game, "reminder-inline-game-icon"));
+      const timing = completed
         ? `Completed · released ${formatShort(character.date)}`
         : character.date > todayKey()
           ? `Starts ${formatShort(character.date)}`
+          : character.date === todayKey()
+            ? "Released today"
           : end
             ? `Active through ${formatShort(end)}`
-            : `Active since ${formatShort(character.date)}`;
+            : `Released ${formatShort(character.date)}`;
+      meta.appendChild(document.createTextNode(`${game} · ${timing}`));
       body.append(title, meta);
       li.append(check, portrait, body);
-      group.querySelector("ul").appendChild(li);
+      list.appendChild(li);
     });
+    remindersView.appendChild(list);
   }
 
   function renderReminders() {
     remindersView.innerHTML = "";
     const tKey = todayKey();
-    const active = [];
-    const completed = [];
+    const upcoming = [];
+    const current = [];
 
-    SUGGEST_ORDER.forEach((game) => {
+    selectedGameNames().forEach((game) => {
       gameCharacters(game).forEach((character) => {
-        const entry = { game, character, end: characterEndKey(game, character) };
-        if (completedCharacters[characterReminderKey(game, character)]) completed.push(entry);
-        else if (character.date >= tKey || !entry.end || tKey <= entry.end) active.push(entry);
+        const entry = {
+          game,
+          character,
+          end: characterEndKey(game, character),
+          completed: !!completedCharacters[characterReminderKey(game, character)],
+        };
+        if (character.date > tKey) upcoming.push(entry);
+        else if (!entry.end || tKey <= entry.end) current.push(entry);
       });
     });
+    const chronological = (a, b) =>
+      a.character.date.localeCompare(b.character.date) ||
+      a.game.localeCompare(b.game) ||
+      a.character.name.localeCompare(b.character.name);
+    upcoming.sort(chronological);
+    current.sort(
+      (a, b) =>
+        (a.end || "9999-12-31").localeCompare(b.end || "9999-12-31") || chronological(a, b)
+    );
 
     const head = document.createElement("div");
     head.className = "reminders-head";
     head.innerHTML = '<i class="bi bi-person-hearts"></i><span>Character reminders</span>';
     remindersView.appendChild(head);
 
-    if (active.length) {
-      appendCharacterGroups(active, false);
+    const tabs = document.createElement("div");
+    tabs.className = "reminder-range-tabs";
+    tabs.setAttribute("role", "group");
+    tabs.setAttribute("aria-label", "Character banner range");
+    [
+      { value: "upcoming", label: "Upcoming", count: upcoming.length },
+      { value: "current", label: "Current", count: current.length },
+    ].forEach(({ value, label, count }) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = reminderRange === value ? "active" : "";
+      button.setAttribute("aria-pressed", String(reminderRange === value));
+      button.innerHTML = `<span>${label}</span><small>${count}</small>`;
+      button.addEventListener("click", () => {
+        reminderRange = value;
+        renderReminders();
+      });
+      tabs.appendChild(button);
+    });
+    remindersView.appendChild(tabs);
+
+    const shown = reminderRange === "current" ? current : upcoming;
+    if (shown.length) {
+      appendCharacterList(shown, reminderRange === "current");
     } else {
       const p = document.createElement("p");
       p.className = "small text-body-secondary mb-0";
-      p.textContent = "No active or upcoming character banners on record.";
+      p.textContent =
+        reminderRange === "current"
+          ? "No current character banners on record."
+          : "No upcoming character banners on record.";
       remindersView.appendChild(p);
-    }
-
-    if (completed.length) {
-      const doneHead = document.createElement("h2");
-      doneHead.className = "reminders-completed-head";
-      doneHead.textContent = "Completed";
-      remindersView.appendChild(doneHead);
-      appendCharacterGroups(completed, true);
     }
   }
 
@@ -1844,7 +3032,14 @@
 
   form.addEventListener("submit", (e) => {
     e.preventDefault();
-    addTask(input.value, dueDate.value || null, currentRep());
+    const rep = currentRep();
+    if (!rep && !dueDate.value) {
+      dueDate.setCustomValidity("Set a date for a non-recurring task.");
+      dueDate.reportValidity();
+      dueDate.focus();
+      return;
+    }
+    if (!addTask(input.value, dueDate.value || null, rep)) return;
     input.value = "";
     input.focus();
     dueDate.value = "";
@@ -1853,6 +3048,23 @@
   });
 
   input.addEventListener("input", updateSuggestions);
+  input.addEventListener("focus", () => {
+    if (suppressSuggestionOpen) {
+      suppressSuggestionOpen = false;
+      return;
+    }
+    updateSuggestions();
+  });
+  input.addEventListener("click", updateSuggestions);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") hideSuggestions();
+  });
+  suggestBox.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    hideSuggestions();
+    suppressSuggestionOpen = true;
+    input.focus();
+  });
 
   // Clicking outside the suggestion area closes it.
   document.addEventListener("click", (e) => {
@@ -1861,7 +3073,15 @@
 
   clearDue.addEventListener("click", () => {
     dueDate.value = "";
+    dueDate.setCustomValidity("");
     dueDate.focus();
+  });
+
+  dueDate.addEventListener("input", () => dueDate.setCustomValidity(""));
+  dueDate.addEventListener("invalid", () => {
+    if (repeat.type === "none") {
+      dueDate.setCustomValidity("Set a date for a non-recurring task.");
+    }
   });
 
   duePick.addEventListener("click", () => openDatePicker(dueDate));
@@ -1887,32 +3107,85 @@
     render();
   });
 
-  clearBtn.addEventListener("click", clearCompleted);
+  progressTabs.addEventListener("click", (e) => {
+    const button = e.target.closest("[data-progress-range]");
+    if (!button) return;
+    progressRange = button.dataset.progressRange;
+    storageSet(PROGRESS_RANGE_KEY, progressRange);
+    renderProgress();
+  });
 
-  // Wipe every task from the list + localStorage (confirm first).
+  // Wipe all app data except the display theme (confirm first).
   clearAll.addEventListener("click", () => {
     showDialog({
-      title: "Clear all tasks?",
-      body: "This permanently deletes every task (including recurring history) from this browser. This cannot be undone.",
+      title: "Clear all data?",
+      body: "This permanently deletes all tasks, selected games, character reminders, and progress history from this browser. Your theme is kept.",
       okLabel: "Delete all",
     }).then((ok) => {
       if (!ok) return;
       tasks = [];
+      selectedGames = new Set();
+      completedCharacters = {};
+      dismissedTodayReminders = {};
+      progressHistory = [];
+      progressRange = "day";
       save();
+      saveSelectedGames();
+      saveCompletedCharacters();
+      saveDismissedTodayReminders();
+      saveProgressHistory();
+      storageRemove(PROGRESS_RANGE_KEY);
       render();
       hideSuggestions();
     });
   });
 
-  dateLine.textContent = new Date().toLocaleDateString(undefined, {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
+  function updateDateLine() {
+    dateLine.textContent = new Date().toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+    });
+  }
+
+  let lastRenderedDay = todayKey();
+  let midnightTimer;
+
+  function refreshAfterDateChange() {
+    const current = todayKey();
+    if (current === lastRenderedDay) return;
+    const previous = lastRenderedDay;
+    const previousDate = fromKey(previous);
+    const currentDate = fromKey(current);
+    if (selectedKey === previous) selectedKey = current;
+    if (calYear === previousDate.getFullYear() && calMonth === previousDate.getMonth()) {
+      calYear = currentDate.getFullYear();
+      calMonth = currentDate.getMonth();
+    }
+    lastRenderedDay = current;
+    updateDateLine();
+    render();
+  }
+
+  function scheduleMidnightRefresh() {
+    window.clearTimeout(midnightTimer);
+    const next = new Date();
+    next.setHours(24, 0, 0, 100);
+    midnightTimer = window.setTimeout(() => {
+      refreshAfterDateChange();
+      scheduleMidnightRefresh();
+    }, next.getTime() - Date.now());
+  }
+
+  window.addEventListener("focus", refreshAfterDateChange);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refreshAfterDateChange();
   });
 
   // ---- boot ----
   initTheme();
-  syncExistingGamePacks();
   updateRepeatUI();
+  updateDateLine();
   render();
+  scheduleMidnightRefresh();
 })();

@@ -18,7 +18,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Tasks — A Simple To-Do List</title>
+  <title>Task Reminder</title>
 
   <script>
     try {
@@ -42,12 +42,15 @@
   <main class="app-shell">
     <header class="app-header">
       <div class="app-heading">
-        <p class="eyebrow">Personal operating system</p>
-        <h1 class="font-display">Make room for what matters.</h1>
+        <h1 class="font-display">Task Reminder</h1>
         <p class="app-date" id="dateLine"></p>
       </div>
       <div class="app-actions">
-        <span class="local-status"><i class="bi bi-shield-check"></i> Stored on this device</span>
+        <span class="local-status" id="localStatus"><i class="bi bi-shield-check"></i> Stored on this device</span>
+        <button type="button" id="settingsToggle" class="btn settings-toggle" aria-label="Open data settings" aria-controls="settingsPanel" aria-expanded="false">
+          <i class="bi bi-gear"></i>
+          <span class="d-none d-sm-inline">Settings</span>
+        </button>
         <button type="button" id="themeToggle" class="btn theme-toggle" aria-label="Toggle night mode">
           <i class="bi bi-moon-stars" id="themeIcon"></i>
           <span id="themeLabel">Night</span>
@@ -77,6 +80,56 @@
               </li>
             </ul>
 
+            <section id="settingsPanel" class="settings-panel d-none" aria-labelledby="settingsTitle">
+              <div class="settings-panel-head">
+                <div>
+                  <span class="settings-eyebrow">Portable backup</span>
+                  <h2 id="settingsTitle" class="font-display">Move your data</h2>
+                  <p>Export everything saved by Task Reminder, then import it on another device.</p>
+                </div>
+                <button type="button" id="settingsClose" class="btn settings-close" aria-label="Close settings">
+                  <i class="bi bi-x-lg"></i>
+                </button>
+              </div>
+
+              <div class="settings-grid">
+                <section class="settings-block" aria-labelledby="exportTitle">
+                  <div class="settings-block-icon"><i class="bi bi-box-arrow-up-right"></i></div>
+                  <div>
+                    <h3 id="exportTitle">Export data</h3>
+                    <p>Download a backup file or copy the same backup as text.</p>
+                  </div>
+                  <textarea id="exportDataText" class="data-textarea" readonly spellcheck="false" aria-label="Exported backup text"></textarea>
+                  <div class="settings-actions">
+                    <button type="button" id="downloadData" class="btn btn-primary settings-action">
+                      <i class="bi bi-download"></i> Download file
+                    </button>
+                    <button type="button" id="copyData" class="btn btn-outline-secondary settings-action">
+                      <i class="bi bi-clipboard"></i> Copy text
+                    </button>
+                  </div>
+                </section>
+
+                <section class="settings-block" aria-labelledby="importTitle">
+                  <div class="settings-block-icon import"><i class="bi bi-box-arrow-in-down"></i></div>
+                  <div>
+                    <h3 id="importTitle">Import data</h3>
+                    <p>Choose a backup file or paste backup text below.</p>
+                  </div>
+                  <input type="file" id="importDataFile" class="visually-hidden" accept=".json,application/json">
+                  <label for="importDataFile" class="btn btn-outline-secondary settings-file-button">
+                    <i class="bi bi-file-earmark-code"></i> Choose backup file
+                  </label>
+                  <textarea id="importDataText" class="data-textarea" spellcheck="false" placeholder="Paste Task Reminder backup text here" aria-label="Backup text to import"></textarea>
+                  <button type="button" id="importData" class="btn btn-primary settings-action">
+                    <i class="bi bi-arrow-repeat"></i> Replace with imported data
+                  </button>
+                  <p class="settings-warning"><i class="bi bi-exclamation-circle"></i> Importing replaces all data currently saved on this device.</p>
+                </section>
+              </div>
+              <p id="dataTransferStatus" class="data-transfer-status" role="status" aria-live="polite"></p>
+            </section>
+
             <div id="tasksView">
             <!-- Add task -->
             <form id="taskForm" class="mb-3" autocomplete="off">
@@ -87,9 +140,11 @@
                       <i class="bi bi-pencil-square text-primary"></i>
                     </span>
                     <input type="text" id="taskInput" class="form-control border-start-0 ps-0"
-                           placeholder="What needs to be done?" aria-label="New task" maxlength="160">
+                           placeholder="What needs to be done?" aria-label="New task" maxlength="160"
+                           aria-controls="suggestBox" aria-expanded="false" aria-describedby="gamePickerHint">
                   </div>
-                  <div id="suggestBox" class="suggest-box d-none" role="listbox" aria-label="Quick-add suggestions"></div>
+                  <div id="suggestBox" class="suggest-box game-picker d-none" role="group" aria-label="Select games"></div>
+                  <span class="visually-hidden" id="gamePickerHint">Focus this field to choose tracked games, or type to add a personal task.</span>
                 </div>
                 <button type="submit" class="btn btn-primary px-4 fw-semibold d-flex align-items-center gap-2">
                   <i class="bi bi-plus-lg"></i><span class="d-none d-sm-inline">Add</span>
@@ -133,10 +188,11 @@
                   <button type="button" id="duePick" class="input-group-text bg-transparent border-end-0" aria-label="Pick a date">
                     <i class="bi bi-calendar3"></i>
                   </button>
-                  <input type="date" id="dueDate" class="form-control border-start-0" aria-label="Due date">
+                  <input type="date" id="dueDate" class="form-control border-start-0" aria-label="Due date"
+                         title="A date is required for non-recurring tasks" required aria-required="true">
                 </div>
                 <button type="button" id="clearDue"
-                        class="btn btn-link btn-sm text-body-secondary text-decoration-none p-0">No date</button>
+                        class="btn btn-link btn-sm text-body-secondary text-decoration-none p-0">Clear date</button>
               </div>
             </form>
 
@@ -144,22 +200,17 @@
             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
               <ul class="nav nav-pills nav-sm small" id="filters" role="tablist">
                 <li class="nav-item" role="presentation">
-                  <button class="nav-link active py-1 px-3" data-filter="all" type="button">All</button>
-                </li>
-                <li class="nav-item" role="presentation">
-                  <button class="nav-link py-1 px-3" data-filter="active" type="button">Active</button>
+                  <button class="nav-link active py-1 px-3" data-filter="active" type="button">Active</button>
                 </li>
                 <li class="nav-item" role="presentation">
                   <button class="nav-link py-1 px-3" data-filter="completed" type="button">Completed</button>
                 </li>
+                <li class="nav-item" role="presentation">
+                  <button class="nav-link py-1 px-3" data-filter="all" type="button">All</button>
+                </li>
               </ul>
               <span class="small text-body-secondary" id="counter">0 tasks left</span>
             </div>
-
-            <hr class="text-body-secondary opacity-25 my-2">
-
-            <!-- Per-game activity boxes (from the quick-add game packs) -->
-            <div id="gameBoxes" class="game-boxes d-none" aria-live="polite"></div>
 
             <!-- Task list (non-game tasks) -->
             <div class="task-columns" id="taskList" aria-live="polite">
@@ -188,6 +239,14 @@
               <p class="small text-body-secondary mb-0" id="emptyMsg">Add a task above to get started.</p>
             </div>
 
+            <hr class="text-body-secondary opacity-25 my-2">
+
+            <!-- Dismissible character releases scheduled for today -->
+            <div id="todayReminders" class="today-reminders d-none" aria-live="polite"></div>
+
+            <!-- Per-game activity boxes (from the quick-add game packs) -->
+            <div id="gameBoxes" class="game-boxes d-none" aria-live="polite"></div>
+
             </div><!-- /#tasksView -->
 
             <!-- Reminders view: upcoming activities (characters + patch events) -->
@@ -195,10 +254,7 @@
 
           </div>
 
-          <div class="card-footer bg-transparent border-0 d-flex justify-content-between align-items-center px-4 pb-4 pt-0" id="taskFooter">
-            <button class="btn btn-link btn-sm text-body-secondary text-decoration-none p-0" id="clearCompleted" type="button">
-              Clear completed
-            </button>
+          <div class="card-footer bg-transparent border-0 d-flex justify-content-end align-items-center px-4 pb-4 pt-0" id="taskFooter">
             <span class="small text-body-secondary" id="progressLabel">0% done</span>
           </div>
         </div>
@@ -216,7 +272,9 @@
 
             <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
               <h5 class="font-display fs-5 mb-0" id="calTitle">Month</h5>
-              <div class="d-flex align-items-center gap-1">
+              <div class="calendar-controls">
+                <label for="calDateJump" class="visually-hidden">Jump calendar to date</label>
+                <input type="date" id="calDateJump" class="cal-date-jump" aria-label="Jump calendar to date" title="Jump calendar to date">
                 <button type="button" id="calToday" class="btn btn-sm btn-outline-secondary rounded-pill px-3">Today</button>
                 <button type="button" id="calPrev" class="btn btn-sm btn-outline-secondary rounded-circle" aria-label="Previous month">
                   <i class="bi bi-chevron-left"></i>
@@ -255,6 +313,24 @@
 
           </div>
         </div>
+
+        <!-- Completion progress: adaptive Day / Week / Month visual -->
+        <section class="progress-panel sidebar-progress" id="progressPanel" aria-labelledby="progressTitle">
+          <div class="progress-panel-head">
+            <div>
+              <span class="progress-eyebrow">Momentum</span>
+              <h2 id="progressTitle">Your progress</h2>
+            </div>
+            <div class="progress-range-tabs" id="progressTabs" role="group" aria-label="Progress range">
+              <button type="button" class="active" data-progress-range="day" aria-pressed="true">Day</button>
+              <button type="button" data-progress-range="week" aria-pressed="false">Week</button>
+              <button type="button" data-progress-range="month" aria-pressed="false">Month</button>
+            </div>
+          </div>
+          <div class="progress-range-label" id="progressRangeLabel"></div>
+          <div class="progress-visual" id="progressVisual" aria-live="polite"></div>
+          <div class="progress-breakdown" id="progressBreakdown"></div>
+        </section>
       </aside>
 
     </div>
@@ -263,7 +339,7 @@
   <!-- Clear all history (floating at the bottom-right) -->
   <button type="button" id="clearAll"
           class="btn clear-all-btn d-inline-flex align-items-center gap-2 rounded-pill"
-          aria-label="Clear all tasks">
+          aria-label="Clear all app data">
     <i class="bi bi-trash3"></i><span class="d-none d-sm-inline">Clear all</span>
   </button>
 
