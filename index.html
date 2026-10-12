@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<!--
+  Tasks — markup for the to-do app. app.js drives everything and looks up every
+  element by id (no framework), so keep the ids here in sync with app.js.
+
+  Layout
+    Left card  - add-task form (repeat dropdown + due-date picker + "No date"),
+                 filter pills (All / Active / Completed), and a two-column list:
+                 Recurring (left) | One-time (right).
+    Right card - month calendar showing only ACTIVE tasks; picking a day lists
+                 that day's tasks and lets you add a new one for that day.
+    Bottom     - #confirmModal: confirm/reminder dialog used before completing
+                 future one-time tasks.
+  Theme is applied by the tiny inline script before paint (avoids a flash on
+  reload), then kept in sync by app.js.
+-->
+<html lang="en" data-bs-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tasks — A Simple To-Do List</title>
+
+  <script>
+    try {
+      var t = localStorage.getItem("elegant-todo.theme");
+      if (t === "dark" || t === "light") document.documentElement.setAttribute("data-bs-theme", t);
+    } catch (e) {}
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <link href="style.css" rel="stylesheet">
+</head>
+<body>
+
+  <div class="bg-glow" aria-hidden="true"></div>
+
+  <main class="app-shell">
+    <header class="app-header">
+      <div class="app-heading">
+        <p class="eyebrow">Personal operating system</p>
+        <h1 class="font-display">Make room for what matters.</h1>
+        <p class="app-date" id="dateLine"></p>
+      </div>
+      <div class="app-actions">
+        <span class="local-status"><i class="bi bi-shield-check"></i> Stored on this device</span>
+        <button type="button" id="themeToggle" class="btn theme-toggle" aria-label="Toggle night mode">
+          <i class="bi bi-moon-stars" id="themeIcon"></i>
+          <span id="themeLabel">Night</span>
+        </button>
+      </div>
+    </header>
+
+    <div class="workspace">
+
+      <!-- Left: tasks -->
+      <section class="work-panel task-panel">
+
+        <div class="card glass-card border-0 shadow-lg rounded-4 overflow-hidden">
+          <div class="card-body p-4">
+
+            <!-- View tabs: Tasks | Reminders -->
+            <ul class="nav nav-pills view-tabs mb-3" id="viewTabs" role="tablist">
+              <li class="nav-item" role="presentation">
+                <button class="nav-link active" data-view="tasks" type="button">
+                  <i class="bi bi-list-check"></i> Tasks
+                </button>
+              </li>
+              <li class="nav-item" role="presentation">
+                <button class="nav-link" data-view="reminders" type="button">
+                  <i class="bi bi-stars"></i> Reminders
+                </button>
+              </li>
+            </ul>
+
+            <div id="tasksView">
+            <!-- Add task -->
+            <form id="taskForm" class="mb-3" autocomplete="off">
+              <div class="d-flex gap-2">
+                <div id="suggestWrap" class="position-relative flex-grow-1">
+                  <div class="input-group input-group-lg">
+                    <span class="input-group-text bg-transparent border-end-0">
+                      <i class="bi bi-pencil-square text-primary"></i>
+                    </span>
+                    <input type="text" id="taskInput" class="form-control border-start-0 ps-0"
+                           placeholder="What needs to be done?" aria-label="New task" maxlength="160">
+                  </div>
+                  <div id="suggestBox" class="suggest-box d-none" role="listbox" aria-label="Quick-add suggestions"></div>
+                </div>
+                <button type="submit" class="btn btn-primary px-4 fw-semibold d-flex align-items-center gap-2">
+                  <i class="bi bi-plus-lg"></i><span class="d-none d-sm-inline">Add</span>
+                </button>
+              </div>
+
+              <div class="d-flex align-items-center gap-3 mt-2 flex-wrap">
+                <div class="dropdown">
+                  <button type="button" id="repeatToggle" class="btn btn-sm btn-outline-secondary rounded-pill px-3 d-flex align-items-center gap-1"
+                          data-bs-toggle="dropdown" aria-expanded="false">
+                    <i class="bi bi-arrow-repeat"></i>
+                    <span id="repeatLabel">Repeat</span>
+                  </button>
+                  <div class="dropdown-menu p-3 shadow rounded-4" id="repeatMenu" style="min-width: 258px;">
+                    <button type="button" class="dropdown-item rounded-2 active" data-repeat="none">
+                      <i class="bi bi-x-circle me-2"></i>Does not repeat
+                    </button>
+                    <button type="button" class="dropdown-item rounded-2" data-repeat="daily">
+                      <i class="bi bi-sun me-2"></i>Every day
+                    </button>
+                    <div class="dropdown-divider"></div>
+                    <div class="text-uppercase fw-semibold text-body-secondary repeat-heading">Every week on</div>
+                    <div class="d-flex justify-content-between gap-1 mb-2" id="weekdayPicker">
+                      <button type="button" class="wd-btn" data-weekday="0" title="Sunday">S</button>
+                      <button type="button" class="wd-btn" data-weekday="1" title="Monday">M</button>
+                      <button type="button" class="wd-btn" data-weekday="2" title="Tuesday">T</button>
+                      <button type="button" class="wd-btn" data-weekday="3" title="Wednesday">W</button>
+                      <button type="button" class="wd-btn" data-weekday="4" title="Thursday">T</button>
+                      <button type="button" class="wd-btn" data-weekday="5" title="Friday">F</button>
+                      <button type="button" class="wd-btn" data-weekday="6" title="Saturday">S</button>
+                    </div>
+                    <div class="dropdown-divider"></div>
+                    <button type="button" class="dropdown-item rounded-2" data-repeat="monthly">
+                      <i class="bi bi-calendar-month me-2"></i>Every month
+                    </button>
+                    <div class="small text-body-secondary mt-2 mb-0 d-none" id="repeatHint"></div>
+                  </div>
+                </div>
+
+                <div class="input-group input-group-sm due-group">
+                  <button type="button" id="duePick" class="input-group-text bg-transparent border-end-0" aria-label="Pick a date">
+                    <i class="bi bi-calendar3"></i>
+                  </button>
+                  <input type="date" id="dueDate" class="form-control border-start-0" aria-label="Due date">
+                </div>
+                <button type="button" id="clearDue"
+                        class="btn btn-link btn-sm text-body-secondary text-decoration-none p-0">No date</button>
+              </div>
+            </form>
+
+            <!-- Filters -->
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+              <ul class="nav nav-pills nav-sm small" id="filters" role="tablist">
+                <li class="nav-item" role="presentation">
+                  <button class="nav-link active py-1 px-3" data-filter="all" type="button">All</button>
+                </li>
+                <li class="nav-item" role="presentation">
+                  <button class="nav-link py-1 px-3" data-filter="active" type="button">Active</button>
+                </li>
+                <li class="nav-item" role="presentation">
+                  <button class="nav-link py-1 px-3" data-filter="completed" type="button">Completed</button>
+                </li>
+              </ul>
+              <span class="small text-body-secondary" id="counter">0 tasks left</span>
+            </div>
+
+            <hr class="text-body-secondary opacity-25 my-2">
+
+            <!-- Per-game activity boxes (from the quick-add game packs) -->
+            <div id="gameBoxes" class="game-boxes d-none" aria-live="polite"></div>
+
+            <!-- Task list (non-game tasks) -->
+            <div class="task-columns" id="taskList" aria-live="polite">
+              <section class="task-column" id="recurringColumn">
+                <h2 class="task-section">
+                  <span class="task-section-label"><i class="bi bi-arrow-repeat"></i> Recurring</span>
+                  <span class="task-section-count" id="recurringCount">0</span>
+                </h2>
+                <ul class="list-unstyled mb-0" id="recurringList"></ul>
+              </section>
+              <section class="task-column" id="oneshotColumn">
+                <h2 class="task-section">
+                  <span class="task-section-label"><i class="bi bi-list-check"></i> One-time</span>
+                  <span class="task-section-count" id="oneshotCount">0</span>
+                </h2>
+                <ul class="list-unstyled mb-0" id="oneshotList"></ul>
+              </section>
+            </div>
+
+            <!-- Empty state -->
+            <div id="emptyState" class="text-center py-5 d-none">
+              <div class="empty-icon mb-3">
+                <i class="bi bi-check2-circle"></i>
+              </div>
+              <p class="fw-semibold mb-1" id="emptyTitle">All clear</p>
+              <p class="small text-body-secondary mb-0" id="emptyMsg">Add a task above to get started.</p>
+            </div>
+
+            </div><!-- /#tasksView -->
+
+            <!-- Reminders view: upcoming activities (characters + patch events) -->
+            <div id="remindersView" class="d-none" aria-live="polite"></div>
+
+          </div>
+
+          <div class="card-footer bg-transparent border-0 d-flex justify-content-between align-items-center px-4 pb-4 pt-0" id="taskFooter">
+            <button class="btn btn-link btn-sm text-body-secondary text-decoration-none p-0" id="clearCompleted" type="button">
+              Clear completed
+            </button>
+            <span class="small text-body-secondary" id="progressLabel">0% done</span>
+          </div>
+        </div>
+
+        <p class="panel-footnote">
+          <i class="bi bi-heart-fill text-danger"></i> Saved locally in your browser
+        </p>
+
+      </section>
+
+      <!-- Right: calendar -->
+      <aside class="work-panel calendar-panel">
+        <div class="card glass-card border-0 shadow-lg rounded-4 cal-card">
+          <div class="card-body p-4">
+
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+              <h5 class="font-display fs-5 mb-0" id="calTitle">Month</h5>
+              <div class="d-flex align-items-center gap-1">
+                <button type="button" id="calToday" class="btn btn-sm btn-outline-secondary rounded-pill px-3">Today</button>
+                <button type="button" id="calPrev" class="btn btn-sm btn-outline-secondary rounded-circle" aria-label="Previous month">
+                  <i class="bi bi-chevron-left"></i>
+                </button>
+                <button type="button" id="calNext" class="btn btn-sm btn-outline-secondary rounded-circle" aria-label="Next month">
+                  <i class="bi bi-chevron-right"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="calendar-grid mb-1">
+              <div class="cal-weekday">Su</div>
+              <div class="cal-weekday">Mo</div>
+              <div class="cal-weekday">Tu</div>
+              <div class="cal-weekday">We</div>
+              <div class="cal-weekday">Th</div>
+              <div class="cal-weekday">Fr</div>
+              <div class="cal-weekday">Sa</div>
+            </div>
+            <div class="calendar-grid" id="calDays"></div>
+
+            <hr class="text-body-secondary opacity-25 my-3">
+
+            <div class="d-flex justify-content-between align-items-baseline mb-2 gap-2">
+              <span class="small fw-semibold" id="calSelectedLabel">Today</span>
+              <span class="small text-body-secondary" id="calSelectedCount"></span>
+            </div>
+
+            <ul class="list-unstyled mb-2" id="calTaskList"></ul>
+
+            <form id="calForm" class="d-flex gap-2" autocomplete="off">
+              <input type="text" id="calInput" class="form-control form-control-sm"
+                     placeholder="Add a task on this day..." aria-label="New task for selected day" maxlength="160">
+              <button type="submit" class="btn btn-sm btn-primary px-3"><i class="bi bi-plus-lg"></i></button>
+            </form>
+
+          </div>
+        </div>
+      </aside>
+
+    </div>
+  </main>
+
+  <!-- Clear all history (floating at the bottom-right) -->
+  <button type="button" id="clearAll"
+          class="btn clear-all-btn d-inline-flex align-items-center gap-2 rounded-pill"
+          aria-label="Clear all tasks">
+    <i class="bi bi-trash3"></i><span class="d-none d-sm-inline">Clear all</span>
+  </button>
+
+  <!-- Confirm / reminder dialog -->
+  <div class="modal fade" id="confirmModal" tabindex="-1" aria-labelledby="confirmModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content border-0 shadow-lg rounded-4">
+        <div class="modal-header border-0 pb-0">
+          <h5 class="modal-title font-display" id="confirmModalTitle">Confirm</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body pt-1" id="confirmModalBody"></div>
+        <div class="modal-footer border-0 pt-0">
+          <button type="button" class="btn btn-outline-secondary rounded-pill px-3" id="confirmCancelBtn" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary rounded-pill px-3" id="confirmOkBtn">OK</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="gamedata.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
